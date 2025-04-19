@@ -4,252 +4,217 @@ from deep_translator import GoogleTranslator
 from langdetect import detect, LangDetectException
 import emoji
 import re
-from transformers import pipeline, set_seed
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import openai
 import os
+import requests
+import openai
+import google.generativeai as genai
 from dotenv import load_dotenv
 from youtube_comment_downloader import YoutubeCommentDownloader
 from yt_dlp import YoutubeDL
-import requests
 
-# --- Setup ---
+# --- Load Keys ---
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-set_seed(42)
-sentiment_analyzer = pipeline("sentiment-analysis", device=-1)
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# --- Allowed Languages ---
-allowed_languages = ['en', 'hi', 'kn', 'te', 'ta', 'ko', 'ja']
+# --- Language Configuration ---
+allowed_languages = ["en", "hi", "kn", "te", "ta", "ko", "ja"]
 
-# --- Utilities ---
-def load_lottieurl(url):
-    try:
-        r = requests.get(url)
-        if r.status_code != 200:
-            return None
-        return r.json()
-    except:
-        return None
-
+# --- Language Detection ---
 def safe_detect_language(text):
     try:
         if not text or len(text.strip()) < 3:
-            return 'en'
-
-        # Check for emoji-only text
+            return "en"
         if all(char in emoji.EMOJI_DATA for char in text.strip()):
-            return 'emoji'
+            return "emoji"
 
-        # Manually checking for language patterns (for Indian languages like Kannada, Telugu, Tamil)
-        # Simple keywords to detect these languages
-        indian_keywords = {
-            'hi': ['kaise', 'kya', 'aap', 'hai', 'kar', 'ho', 'pyar', 'dost'],
-            'kn': ['ಹೇಗಿದೆ', 'ನೀವು', 'ಅವನು', 'ಇದು', 'ಪ್ರೀತಿ'],
-            'te': ['ఏంటి', 'నేను', 'మీరు', 'అది', 'ప్రేమ'],
-            'ta': ['எப்படி', 'நீங்கள்', 'அது', 'காதல்', 'பொறுப்பு'],
-            'ko': ['어떻게', '너', '그것', '사랑'],
-            'ja': ['どう', 'あなた', 'それ', '愛'],
+        transliterated_keywords = {
+            "hi": ["kon", "kya", "kaise", "video", "dekh", "pyar", "mera", "bhot", "acha", "dil"],
+            "ta": ["ungal", "pudhu", "nalla", "enna", "romba"],
+            "te": ["chala", "video", "manchi", "meeru"],
+            "kn": ["hesaru", "ondhu", "nodi"]
         }
-        
-        # Check if the comment contains keywords from any language
-        for lang, keywords in indian_keywords.items():
-            if any(keyword in text.lower() for keyword in keywords):
+        text_lower = text.lower()
+        for lang, keywords in transliterated_keywords.items():
+            if any(kw in text_lower for kw in keywords):
                 return lang
-        
-        # Use langdetect to detect the language
-        lang = detect(text)
-        if lang in allowed_languages:
-            return lang
-        return 'en'
-    
-    except LangDetectException:
-        return 'en'
 
+        lang = detect(text)
+        return lang if lang in allowed_languages else "en"
+    except LangDetectException:
+        return "en"
+
+# --- Tone Detection ---
 def detect_tone(text):
     if not text:
         return "Neutral"
+    text_lower = text.lower()
 
-    text_lower = text.lower().strip()
-    if all(char in emoji.EMOJI_DATA for char in text.strip()):
-        return "Emoji"
-
+    if all(char in emoji.EMOJI_DATA for char in text):
+        return "Praise"
     if re.search(r"\b\d{1,2}:\d{2}\b", text_lower):
         return "Timestamp"
-
     if re.search(r"\b(19|20)\d{2}\b", text_lower):
         return "Year"
+    if any(word in text_lower for word in ["lol", "lmao", "rofl", "haha"]):
+        return "Humor"
+
+    positive_emojis = ["😂", "😍", "❤️", "😊", "😁", "🥰", "🎉", "🖤", "💖", "✨"]
+    if any(e in text for e in positive_emojis):
+        return "Praise"
 
     patterns = {
-        "Humor": r"\b(lol|lmao|rofl|haha|funny)\b",
-        "Praise": r"\b(love|amazing|great job|thank you|awesome|best)\b",
-        "Criticism": r"\b(bad|worst|hate|trash|dislike)\b",
-        "Support": r"\b(nice work|keep it up|respect|well done)\b",
-        "Confusion": r"\b(confused|what)\b",
-        "Request": r"\b(can you|please|would you|could you)\b",
-        "Disapproval": r"\b(wtf|cringe|eww)\b",
+        "Praise": ["love", "beautiful", "amazing", "nice", "great", "wonderful", "awesome"],
+        "Criticism": ["bad", "worst", "hate", "cringe", "trash", "dislike"],
+        "Support": ["respect", "keep it up", "well done", "good job"],
+        "Confusion": ["what", "why", "confused"],
+        "Request": ["please", "can you", "would you", "could you"]
     }
 
-    for tone, pattern in patterns.items():
-        if re.search(pattern, text_lower):
+    for tone, keywords in patterns.items():
+        if any(word in text_lower for word in keywords):
             return tone
+
     return "Neutral"
 
+# --- Sentiment Detection ---
 def detect_sentiment(text):
-    try:
-        if not text:
-            return "Neutral"
-        result = sentiment_analyzer(text)[0]
-        return result['label'].capitalize()
-    except:
-        return "Neutral"
+    return "Positive" if "good" in text.lower() else "Neutral"
 
+# --- Translation ---
 def translate_to_english(text):
     try:
-        if not text:
-            return text
-        return GoogleTranslator(source='auto', target='en').translate(text)
+        return GoogleTranslator(source="auto", target="en").translate(text)
     except:
         return text
 
 def translate_back(reply, lang):
     try:
-        if lang in allowed_languages and lang != 'en':
-            return GoogleTranslator(source='en', target=lang).translate(reply)
+        if lang != "en" and lang in allowed_languages:
+            return GoogleTranslator(source="en", target=lang).translate(reply)
         return reply
     except:
         return reply
 
-def generate_reply(comment, model="gpt-4", video_title=""):
+# --- AI Reply with Fallback ---
+def generate_reply(comment, lang="en"):
     if not comment:
         return "Thanks for your feedback! 👍"
-    
-    tone = detect_tone(comment)
-
-    if tone == "Emoji":
-        return comment
-    if tone == "Timestamp":
-        return "IKR! 🔥 That part was epic!"
-    if tone == "Year":
-        return "Good music days! 🎶 Let's vibe!"
-
-    tone_templates = {
-        "Humor": "😂 That was funny! Glad you're enjoying it!",
-        "Criticism": "Thanks for your feedback. We'll improve! 🙏",
-        "Praise": "So glad you liked it! 😊",
-        "Support": "Appreciate the support! 💪",
-        "Confusion": "Sorry if it wasn't clear. Let us know! 🤔",
-        "Request": "Thanks for the suggestion! We'll consider it. 🙌",
-        "Disapproval": "We'll try to do better next time. 💡",
-    }
-
-    if tone in tone_templates:
-        return tone_templates[tone]
-
     try:
-        prompt = f"""You are a helpful, friendly AI that replies to YouTube comments.
-Reply in 1-2 conversational sentences. Include a light emoji if appropriate.
+        return translate_back(openai_reply(comment), lang)
+    except Exception as e:
+        if "quota" in str(e).lower():
+            try:
+                return translate_back(gemini_reply(comment), lang)
+            except:
+                return translate_back(llama_reply(comment), lang)
+        return translate_back("Thanks for your feedback! 👍", lang)
 
-Comment: \"{comment}\"
-Reply:"""
-        response = openai.ChatCompletion.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=100
-        )
-        reply = response.choices[0].message['content'].strip()
-        return emoji.emojize(reply, language='alias')
+def openai_reply(comment):
+    prompt = f"You are a friendly AI replying to YouTube comments. Be concise.\nComment: {comment}\nReply:"
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=100,
+        temperature=0.7,
+    )
+    return response.choices[0].message.content.strip()
+
+def gemini_reply(comment):
+    model = genai.GenerativeModel("gemini-1.5-pro")
+    response = model.generate_content(f"Reply concisely to this YouTube comment:\n\n{comment}")
+    return response.text.strip()
+
+def llama_reply(comment):
+    try:
+        r = requests.post("http://localhost:11434/api/generate", json={
+            "model": "llama3",
+            "prompt": f"Reply concisely to this YouTube comment:\n\n{comment}"
+        }, timeout=20)
+        return r.json().get("response", "Thanks for your feedback! 👍").strip()
     except:
         return "Thanks for your feedback! 👍"
 
-# --- Streamlit App ---
+# --- Video Info & Summary ---
+def get_video_info(url):
+    try:
+        with YoutubeDL({"quiet": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = info.get("title", "Untitled")
+        genre = info.get("categories", ["Unknown"])
+        description = info.get("description", "")
+        try:
+            summary = gemini_reply(f"Summarize this video description in 2-3 lines:\n{description}")
+        except:
+            summary = openai_reply(f"Summarize this video description in 2-3 lines:\n{description}")
+
+        children_keywords = ["kids", "nursery", "rhymes", "baby", "child", "toddlers", "cartoon", "children", "learning"]
+        children_friendly = any(k in title.lower() or k in description.lower() for k in children_keywords)
+
+        return title, summary, genre[0], "Yes" if children_friendly else "No"
+    except Exception as e:
+        return "Unknown", f"Could not summarize: {e}", "Unknown", "Unknown"
+
+# --- Streamlit UI ---
 def main():
     st.set_page_config(page_title="YouTube Comment AI Replier", layout="wide", page_icon="🤖")
+    st.title("🤖 YouTube Comment AI Replier")
+    st.markdown("💬 Automatically detect language, analyze tone, and generate AI replies with OpenAI, Gemini, and LLaMA fallback!")
 
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown("""<h1 style='font-size: 2.7rem;'>🤖 YouTube Comment <span style='color:#0059b3;'>AI Replier</span></h1>
-            <p style='font-size: 1.2rem;'>✨ Craft replies and understand viewer sentiment instantly!</p>
-        """, unsafe_allow_html=True)
-    with col2:
-        lottie = load_lottieurl("https://assets1.lottiefiles.com/packages/lf20_w51pcehl.json")
-        if lottie:
-            st_lottie(lottie, height=170, key="ai")
-
-    st.sidebar.title("⚙️ Configuration")
-    model_choice = st.sidebar.selectbox("🤖 Model", ["gpt-4"])
-    comment_count = st.sidebar.slider("💬 Number of Comments", 5, 50, 10)
-    show_charts = st.sidebar.checkbox("📊 Show Charts", value=True)
-
-    url = st.text_input("📽️ YouTube Video URL or ID")
-    sort_by = st.selectbox("🔽 Sort Results By", ["Original", "Tone", "Sentiment"])
+    url = st.text_input("📺 Enter YouTube video URL")
+    count = st.slider("Number of comments to fetch", 5, 50, 10)
+    show_charts = st.checkbox("Show analytics", True)
 
     if st.button("✨ Generate Replies") and url:
-        try:
-            st.info("Fetching video info and comments...")
-            ydl_opts = {"quiet": True}
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                video_title = info.get("title") or "Untitled"
+        title, summary, genre, children = get_video_info(url)
+        st.subheader("🎥 Video Overview")
+        st.markdown(f"**Title:** {title}")
+        st.markdown(f"**Summary:** {summary}")
+        st.markdown(f"**Genre:** {genre}")
+        st.markdown(f"**Children Friendly:** {'✅ Yes' if children == 'Yes' else '❌ No'}")
 
-            downloader = YoutubeCommentDownloader()
-            comments = [c['text'] for _, c in zip(range(comment_count), downloader.get_comments_from_url(url))]
+        st.info("⏳ Processing comments and generating replies...")
+        downloader = YoutubeCommentDownloader()
+        comments = [c["text"] for _, c in zip(range(count), downloader.get_comments_from_url(url))]
 
-            replies, tones, sentiments, langs = [], [], [], []
+        data = []
+        for comment in comments:
+            lang = safe_detect_language(comment)
+            translated = translate_to_english(comment) if lang not in ["en", "emoji"] else comment
 
-            with st.spinner("Generating replies..."):
-                for c in comments:
-                    lang = safe_detect_language(c)
-                    langs.append(lang)
+            tone = detect_tone(translated)
+            sentiment = detect_sentiment(translated)
+            reply = generate_reply(translated, lang=lang)
 
-                    if lang in ['en', 'emoji']:
-                        eng_comment = c
-                    else:
-                        eng_comment = translate_to_english(c)
-
-                    tone = detect_tone(eng_comment)
-                    sentiment = detect_sentiment(eng_comment)
-                    reply = generate_reply(eng_comment, model=model_choice, video_title=video_title)
-
-                    final_reply = translate_back(reply, lang)
-                    replies.append(final_reply)
-                    tones.append(tone)
-                    sentiments.append(sentiment)
-
-            # Here we maintain the original order
-            df = pd.DataFrame({
-                "Comment": comments,
-                "Reply": replies,
-                "Tone": tones,
-                "Sentiment": sentiments,
-                "Lang": langs
+            data.append({
+                "Original Comment": comment,
+                "Reply": reply,
+                "Detected Language": lang,
+                "Tone": tone,
+                "Sentiment": sentiment
             })
 
-            if sort_by != "Original":
-                df = df.sort_values(by=sort_by)
+        df = pd.DataFrame(data)
+        st.subheader("💬 AI Generated Replies")
+        st.dataframe(df)
+        st.download_button("📥 Download CSV", df.to_csv(index=False), "ai_replies.csv")
 
-            st.subheader("💬 AI Replies")
-            st.dataframe(df)
-
-            st.download_button("📥 Download CSV", df.to_csv(index=False), "youtube_replies.csv", "text/csv")
-
-            if show_charts:
-                st.subheader("📊 Insights")
-                fig1, ax1 = plt.subplots()
-                sns.countplot(data=df, x="Sentiment", ax=ax1, palette="viridis")
-                ax1.set_title("Sentiment Distribution")
-                st.pyplot(fig1)
-
-                fig2, ax2 = plt.subplots()
-                sns.countplot(data=df, x="Tone", ax=ax2, palette="coolwarm")
-                ax2.set_title("Tone Breakdown")
-                st.pyplot(fig2)
-
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
+        if show_charts:
+            st.subheader("📊 Analytics")
+            col1, col2 = st.columns(2)
+            with col1:
+                fig, ax = plt.subplots()
+                sns.countplot(data=df, x="Sentiment", palette="viridis", ax=ax)
+                ax.set_title("Sentiment Distribution")
+                st.pyplot(fig)
+            with col2:
+                fig, ax = plt.subplots()
+                sns.countplot(data=df, x="Tone", palette="coolwarm", ax=ax)
+                ax.set_title("Tone Analysis")
+                st.pyplot(fig)
 
 if __name__ == "__main__":
     main()
