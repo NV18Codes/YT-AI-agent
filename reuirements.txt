@@ -1,0 +1,13 @@
+streamlit
+openai
+google-generativeai
+deep-translator
+langdetect
+emoji
+pandas
+matplotlib
+seaborn
+python-dotenv
+requests
+yt-dlp
+youtube-comment-downloader
