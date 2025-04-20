@@ -11,3 +11,8 @@ python-dotenv
 requests
 yt-dlp
 youtube-comment-downloader
+streamlit-lottie
+streamlit-qrcode
+streamlit-ace
+streamlit-plotly-events
+streamlit-embeds
